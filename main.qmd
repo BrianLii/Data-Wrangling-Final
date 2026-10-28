@@ -1,0 +1,28 @@
+---
+title: "main"
+format: html
+editor: visual
+---
+
+```{r}
+library(DBI)
+con <- dbConnect(duckdb::duckdb())
+
+dbExecute(con, "CREATE TABLE salamander AS SELECT * FROM
+  read_csv_auto('data/salamander/salamander.csv')")
+dbExecute(con, "CREATE TABLE watershed  AS SELECT * FROM
+  read_csv_auto('data/watershed/watershed.csv')")
+dbExecute(con, "CREATE TABLE weather    AS SELECT * FROM
+  read_csv_auto('data/weather/weather.csv')")
+dbExecute(con, "CREATE TABLE austin_daily AS SELECT * FROM
+  read_csv_auto('data/weathergov/austin_daily.csv')")
+dbExecute(con, "CREATE TABLE usgs AS SELECT * FROM
+  read_csv_auto('data/usgs/usgs_08155500_temp.tsv', delim='\t', comment='#',
+  skip=1)")
+
+
+```
+
+```{r}
+dbGetQuery(con, "SELECT * FROM salamander LIMIT 5")
+```
