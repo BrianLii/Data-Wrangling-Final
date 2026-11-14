@@ -1,0 +1,439 @@
+---
+title: "Do Rain and Water Temperature Affect Salamander Counts at Barton Springs?"
+subtitle: "Data Wrangling Final Project: R tidyverse, DuckDB SQL, Python pandas and Excel Power Query"
+author: "Cody Wood and Brian Li"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+```{r}
+#| include: false
+# Checks that R and each package are installed and new enough for this course.
+# Stops with a list of everything that needs fixing, and how to fix it.
+check_course_versions <- function(required, area) {
+  problems <- character(0)
+  to_install <- character(0)
+  found <- character(0)
+  for (name in names(required)) {
+    need <- required[[name]]
+    if (name == "R") {
+      have <- getRversion()
+      if (have < need) {
+        problems <- c(problems, sprintf(
+          "R is version %s; this course needs %s or newer. Install the current R from https://cran.r-project.org/ (see https://howisonlab.github.io/datawrangling/current/rtidyverse/rstudio_installation.html), then reinstall your packages.",
+          have, need))
+      }
+      found <- c(found, paste("R", have))
+    } else if (!nzchar(system.file(package = name))) {
+      problems <- c(problems, sprintf("%s is not installed.", name))
+      to_install <- c(to_install, name)
+    } else {
+      have <- packageVersion(name)
+      if (have < need) {
+        problems <- c(problems, sprintf(
+          "%s is version %s; this course needs %s or newer.", name, have, need))
+        to_install <- c(to_install, name)
+      } else if (isNamespaceLoaded(name) && getNamespaceVersion(name) != have) {
+        problems <- c(problems, sprintf(
+          "%s %s is installed, but this R session is still using %s. Restart R.",
+          name, have, getNamespaceVersion(name)))
+      }
+      found <- c(found, paste(name, have))
+    }
+  }
+  if (length(problems) > 0) {
+    fix <- "In RStudio choose Session > Restart R"
+    if (length(to_install) > 0) {
+      fix <- paste0(fix, ", then run this in the Console:\n  install.packages(c(",
+                    paste0('"', to_install, '"', collapse = ", "), "))\n")
+    }
+    stop("Course setup (", area, ") found problems:\n  - ",
+         paste(problems, collapse = "\n  - "), "\n\n",
+         fix, "\nThen run the setup chunk(s) again.", call. = FALSE)
+  }
+  cat("Course setup OK (", area, "): ", paste(found, collapse = ", "), "\n", sep = "")
+}
+
+check_course_versions(c(
+  R = "4.5.0",         # CRAN builds Mac/Windows packages for the current and previous R only
+  tidyverse = "2.0.0",
+  dplyr = "1.2.0",     # recode_values() and replace_values()
+  tidyr = "1.3.0",     # separate_wider_delim()
+  gt = "1.0.0",        # needed by gtExtras
+  gtExtras = "0.6.1"   # works with ggplot2 4
+), "R")
+
+library(tidyverse)
+library(gt)
+library(gtExtras)
+```
+
+## Project Summary
+
+We ask whether **recent rainfall** and **water temperature** are related to the number of Barton Springs salamanders observed in City of Austin surveys. We expect counts to rise after heavy rain. We join three datasets from three organizations:
+
+| \# | Dataset | Organization | Content | URL |
+|---------------|---------------|---------------|---------------|---------------|
+| 1 | Barton Springs Salamanders DO and Flow | City of Austin | Salamander surveys and water quality, 1995–2026 | <https://data.austintexas.gov/Environment/Barton-Springs-Salamanders-DO-and-Flow/pyic-v8yf/about_data> |
+| 2 | Austin daily temperature and precipitation | NWS (weather.gov) | Daily weather, 2000–2026 | <https://www.weather.gov/wrh/climate?wfo=ewx&tab=cliplot&sid=AUSthr> |
+| 3 | Barton Springs daily water temperature (site 08155500) | USGS | Daily mean water temperature, 2003–2026 | <https://waterdata.usgs.gov/monitoring-location/USGS-08155500/> |
+
+## Data Sources
+
+```{r}
+#| label: setup
+sal  <- read_csv("data/salamander/salamander.csv", show_col_types = FALSE)
+nws  <- read_csv("data/weathergov/austin_daily.csv", show_col_types = FALSE)
+usgs <- read_tsv("data/usgs/usgs_08155500_temp.tsv", comment = "#",
+                 show_col_types = FALSE)
+```
+
+### 1. Salamander surveys (City of Austin)
+
+Each row is a single measurement taken at one spring on one survey day. `SAMPLE_DATE` is the date and time of the survey, and `SITE_NAME` is the spring where it was taken (Barton, Eliza, Old Mill or Upper Barton Spring), with its coordinates in `LON_DD_WGS84` and `LAT_DD_WGS84`. `PARAM_TYPE` is the broad category of the measurement (`Salamanders`, `Oxygen`, `Flow/Rainfall`, and so on), `PARAMETER` is exactly what was measured (for example `DISSOLVED OXYGEN` or a salamander count for one size class), `RESULT` is the measured value, and `UNIT` is its unit (`Count` for salamanders, `MG/L` for oxygen). `SAMPLE_DATE` is stored as text in month/day/year format with a time (`10/21/2026 11:15:00 AM`), so it has to be parsed into a date before we can group by month.
+
+```{r}
+sal |>
+  filter(PARAM_TYPE == "Salamanders") |>
+  select(SAMPLE_DATE, SITE_NAME, PARAMETER, RESULT, UNIT) |>
+  head(5) |>
+  gt()
+```
+
+### 2. Daily weather (NWS)
+
+Each row is one day of Austin weather, from 2000 to 2026. `date` is the day, `max_temp_f`, `min_temp_f` and `avg_temp_f` are that day's highest, lowest and average air temperature in °F, and `precip_in` is that day's rainfall in inches. Besides numbers, `precip_in` contains `T` (trace, rain too small to measure) and `M` (missing). So we have to read it as text then do some transformation.
+
+```{r}
+nws |> head(4) |> gt()
+```
+
+### 3. Water temperature (USGS)
+
+Each row is one day of readings from the USGS gauge at Barton Springs, from June 2003 to 2026. `agency_cd` is the agency that collected the data (`USGS`), `site_no` is the gauge number (`08155500`), and `datetime` is the day. `136049_00010_00003` is the daily mean water temperature in °C; the name is a USGS code (time series 136049, parameter 00010 = water temperature, statistic 00003 = mean). `136049_00010_00003_cd` is its quality code: `A` approved, `P` provisional, `e` estimated. Directly under the header there is also a format row (`5s`, `15s`, `20d`, ...) that is not data, which makes every column read as text. We use `datetime` and the temperature column.
+
+```{r}
+usgs |> head(3) |> gt()
+```
+
+## Workflow
+
+1.  Read the three files.
+2.  Standardize the salamander parameter names, keep one non-overlapping count measure, and total it per site and survey date.
+3.  Clean daily rain (`T`, `M`) and total it by month. Drop the USGS format row and average water temperature by month.
+4.  Use `left_join` to attach this month's rain, last month's rain and this month's water temperature to each survey, and check that the row count does not change.
+5.  Plot salamander counts against rain and water temperature.
+
+All three tables share a key, `month_id = year * 12 + month`. Last month is `month_id - 1`, so no date arithmetic is needed.
+
+## R
+
+```{r}
+# Salamanders: keep count rows, label each PARAMETER by species and measure
+sal_clean <- sal |>
+  filter(PARAM_TYPE == "Salamanders", UNIT == "Count") |>
+  mutate(
+    species = case_when(
+      str_detect(PARAMETER, "BARTON") ~ "Barton Springs",
+      str_detect(PARAMETER, "AUSTIN") ~ "Austin blind",
+      TRUE ~ "Unknown"
+    ),
+    measure = case_when(
+      str_detect(PARAMETER, "TOTAL") ~ "total by size",
+      str_detect(PARAMETER, " IN | ON ") ~ "by substrate",
+      str_detect(PARAMETER, "PHOTOGRAPHED") ~ "photographed",
+      TRUE ~ "other"
+    ),
+    survey_date = as_date(mdy_hms(SAMPLE_DATE))
+  )
+
+# One row per survey: Barton Springs salamanders, "total by size" only
+bss <- sal_clean |>
+  filter(species == "Barton Springs", measure == "total by size") |>
+  group_by(SITE_NAME, survey_date) |>
+  summarise(bss_total = sum(RESULT, na.rm = TRUE), .groups = "drop") |>
+  mutate(
+    month_id = year(survey_date) * 12 + month(survey_date),
+    prev_month_id = month_id - 1
+  ) |>
+  arrange(survey_date)
+
+# Daily rain -> monthly rain
+rain_month <- nws |>
+  mutate(
+    precip_in = case_when(
+      precip_in == "T" ~ "0.005",
+      precip_in == "M" ~ NA_character_,
+      TRUE ~ precip_in
+    ),
+    precip_in = as.numeric(precip_in),
+    month_id = year(date) * 12 + month(date)
+  ) |>
+  group_by(month_id) |>
+  summarise(rain_in = sum(precip_in, na.rm = TRUE), .groups = "drop")
+
+# Daily water temperature -> monthly mean
+temp_month <- usgs |>
+  filter(agency_cd == "USGS") |>
+  transmute(
+    date = ymd(datetime),
+    water_temp_c = as.numeric(`136049_00010_00003`)
+  ) |>
+  mutate(month_id = year(date) * 12 + month(date)) |>
+  group_by(month_id) |>
+  summarise(water_temp_c = mean(water_temp_c, na.rm = TRUE), .groups = "drop")
+
+# Attach this month's rain, last month's rain and this month's temperature
+final <- bss |>
+  left_join(rain_month, by = "month_id") |>
+  left_join(
+    rain_month |> rename(prev_month_id = month_id, rain_prev_month = rain_in),
+    by = "prev_month_id"
+  ) |>
+  left_join(temp_month, by = "month_id")
+
+stopifnot(nrow(final) == nrow(bss))   # left joins must not add or drop surveys
+
+final |>
+  filter(survey_date >= "2016-03-01") |>
+  select(SITE_NAME, survey_date, bss_total, rain_in, rain_prev_month, water_temp_c) |>
+  head(3) |>
+  gt()
+```
+
+### Challenge 1: one species, many spellings
+
+There are 53 salamander count parameters, with spellings such as `SLMNDR`, `SALMNDR`, `SALAMANDER` and `BSS`. The first 10 of them:
+
+```{r}
+sal |>
+  filter(PARAM_TYPE == "Salamanders", UNIT == "Count") |>
+  distinct(PARAMETER) |>
+  arrange(PARAMETER) |>
+  head(10) |>
+  gt()
+```
+
+Listing all 53 names by hand would be long and easy to get wrong. Instead, the `mutate()` step that builds `sal_clean` looks for a few keywords that every spelling of the same thing shares, and turns each name into two clean columns:
+
+- `species`: names containing `BARTON` become `Barton Springs`; names containing `AUSTIN` become `Austin blind`. This works whether the name says `SPRINGS` or `SPGS`, `SLMNDR` or `SALAMANDER`.
+- `measure`: names containing `TOTAL` become `total by size`; names containing ` IN ` or ` ON ` (in cobble, on exposed substrate, ...) become `by substrate`; names containing `PHOTOGRAPHED` become `photographed`; everything else becomes `other`.
+
+`case_when()` checks these rules from top to bottom and uses the first one that matches. Here is how some of the messy names come out:
+
+```{r}
+sal_clean |>
+  distinct(PARAMETER, species, measure) |>
+  filter(PARAMETER %in% c(
+    "BARTON SPRINGS SLMNDR  (TOTAL <1IN.)",
+    "BARTON SPRINGS SLMNDR (TOTAL 1-2IN.)",
+    "BARTON SPRINGS SLMNDR (<1IN.) IN COBBLE/BOULDER",
+    "BARTON SPRINGS SALAMANDER  (ADULT) ON EXPOSED SUBSTRATE",
+    "BARTON SPGS SALMNDR  (ADULT) > 1 INCH",
+    "NUMBER OF BARTON SPRINGS SALAMANDERS PHOTOGRAPHED",
+    "AUSTIN BLIND SLMNDR (1-2IN.)",
+    "SALAMANDER (UNKNOWN LENGTH)"
+  )) |>
+  arrange(species, measure) |>
+  gt()
+```
+
+After this step, all 53 names fall into a handful of groups:
+
+```{r}
+sal_clean |>
+  group_by(species, measure) |>
+  summarise(n_rows = n(), total = sum(RESULT, na.rm = TRUE), .groups = "drop") |>
+  gt() |>
+  fmt_number(columns = c(n_rows, total), decimals = 0)
+```
+
+Names with neither `BARTON` nor `AUSTIN` (mostly `SALAMANDER (UNKNOWN LENGTH)`) are labelled `Unknown`. We cannot tell which species they are, so they are dropped. They add up to about 856 animals, about 1% of the total.
+
+### Challenge 2: the same animals counted several times
+
+Barton Springs salamanders appear under four measures: a total by size, a breakdown by substrate, adults, and photograph counts. These describe the same animals, so they must not be added together.
+
+```{r}
+bss_all <- sal_clean |> filter(species == "Barton Springs")
+all_measures <- sum(bss_all$RESULT, na.rm = TRUE)
+total_only <- sum(bss_all$RESULT[bss_all$measure == "total by size"], na.rm = TRUE)
+```
+
+Adding every measure gives **`r format(all_measures, big.mark = ",")`** salamanders. Using only `total by size` gives **`r format(total_only, big.mark = ",")`**, a factor of `r round(all_measures / total_only, 1)`. We keep `total by size` because it is the only measure present in every year (1995–2026).
+
+### Transformations
+
+- **Salamanders:** kept only salamander count rows, turned `PARAMETER` into `species` and `measure` (Challenge 1), parsed `SAMPLE_DATE` from text into a date, kept only Barton Springs `total by size` (Challenge 2), and summed the size classes into one count per site and survey day (`bss`).
+- **Rain:** recoded `T` to 0.005 inches and `M` to `NA`, converted `precip_in` to a number, and summed it by month (`rain_month`).
+- **Water temperature:** dropped the format row by keeping only `agency_cd == "USGS"`, converted the temperature column to a number, and averaged it by month (`temp_month`).
+- **Join key:** built `month_id = year * 12 + month` in all three tables; last month is simply `month_id - 1`.
+- **Joining:** three `left_join`s attach this month's rain, last month's rain and this month's water temperature to every survey, and `stopifnot` checks that the number of surveys does not change.
+
+After the joins, each of the `r nrow(final)` surveys is still one row. The salamander surveys start in 1995, but the rain data starts in 2000 and the water temperature data in June 2003, so the earliest surveys get `NA` for those columns (`r sum(is.na(final$rain_in))` without rain, `r sum(is.na(final$water_temp_c))` without water temperature). We keep these surveys in the table; they simply do not appear in the plots below.
+
+### Result
+
+Each point is one survey. Counts range from 0 to over 1,000, so the y axis is on a log scale; we plot count + 1 because the log of 0 is undefined.
+
+```{r}
+#| fig-cap: "Salamander count against rain in the previous month."
+ggplot(final, aes(rain_prev_month, bss_total + 1)) +
+  geom_point(alpha = 0.3) +
+  scale_y_log10() +
+  labs(x = "Rain in previous month (inches)",
+       y = "Salamanders counted + 1 (log scale)")
+```
+
+Rain does not show the pattern we expected. At every rain level the counts spread from zero to several hundred, with no upward slope. The wettest months (over 6 inches) do not have higher counts; if anything they are lower, and there are only a few of them.
+
+```{r}
+#| fig-cap: "Salamander count against mean water temperature in the same month."
+ggplot(final, aes(water_temp_c, bss_total + 1)) +
+  geom_point(alpha = 0.3) +
+  scale_y_log10() +
+  labs(x = "Mean water temperature this month (°C)",
+       y = "Salamanders counted + 1 (log scale)")
+```
+
+Water temperature barely changes. Because the springs are fed by groundwater, almost all months fall between 21 and 22 °C. The high counts cluster in that range, but so do most surveys, so this does not show that temperature drives the counts.
+
+Overall, neither rain nor water temperature has a clear relationship with salamander counts, which does not support our initial expectation. These are *observed* counts, not true population size, and they also depend on survey effort and conditions on the day.
+
+## SQL
+
+```{r}
+library(DBI)
+con <- dbConnect(duckdb::duckdb())
+
+dbExecute(con, "CREATE TABLE sal AS
+  SELECT * FROM read_csv_auto('data/salamander/salamander.csv')")
+dbExecute(con, "CREATE TABLE nws AS
+  SELECT * FROM read_csv_auto('data/weathergov/austin_daily.csv')")
+dbExecute(con, "CREATE TABLE usgs AS
+  SELECT * FROM read_csv_auto('data/usgs/usgs_08155500_temp.tsv',
+                              delim = '\t', comment = '#')")
+```
+
+```{sql}
+--| connection: con
+CREATE TABLE sal_clean AS
+SELECT SITE_NAME, PARAMETER, RESULT,
+       CAST(SAMPLE_DATE AS DATE) AS survey_date,
+       CASE WHEN PARAMETER LIKE '%BARTON%' THEN 'Barton Springs'
+            WHEN PARAMETER LIKE '%AUSTIN%' THEN 'Austin blind'
+            ELSE 'Unknown' END AS species,
+       CASE WHEN PARAMETER LIKE '%TOTAL%' THEN 'total by size'
+            WHEN PARAMETER LIKE '% IN %' OR PARAMETER LIKE '% ON %' THEN 'by substrate'
+            WHEN PARAMETER LIKE '%PHOTOGRAPHED%' THEN 'photographed'
+            ELSE 'other' END AS measure
+FROM sal
+WHERE PARAM_TYPE = 'Salamanders' AND UNIT = 'Count'
+```
+
+```{sql}
+--| connection: con
+CREATE TABLE bss AS
+SELECT SITE_NAME, survey_date,
+       SUM(RESULT) AS bss_total,
+       year(survey_date) * 12 + month(survey_date) AS month_id,
+       year(survey_date) * 12 + month(survey_date) - 1 AS prev_month_id
+FROM sal_clean
+WHERE species = 'Barton Springs' AND measure = 'total by size'
+GROUP BY SITE_NAME, survey_date
+```
+
+```{sql}
+--| connection: con
+CREATE TABLE rain_month AS
+SELECT year(date) * 12 + month(date) AS month_id,
+       SUM(CASE WHEN precip_in = 'T' THEN 0.005
+                WHEN precip_in = 'M' THEN NULL
+                ELSE CAST(precip_in AS DOUBLE) END) AS rain_in
+FROM nws
+GROUP BY month_id
+```
+
+```{sql}
+--| connection: con
+CREATE TABLE temp_month AS
+SELECT year(CAST(datetime AS DATE)) * 12 + month(CAST(datetime AS DATE)) AS month_id,
+       AVG(CAST("136049_00010_00003" AS DOUBLE)) AS water_temp_c
+FROM usgs
+WHERE agency_cd = 'USGS'          -- drops the format row
+GROUP BY month_id
+```
+
+```{sql}
+--| connection: con
+CREATE TABLE final AS
+SELECT b.SITE_NAME, b.survey_date, b.bss_total,
+       r0.rain_in, r1.rain_in AS rain_prev_month, t.water_temp_c
+FROM bss b
+LEFT JOIN rain_month r0 ON r0.month_id = b.month_id
+LEFT JOIN rain_month r1 ON r1.month_id = b.prev_month_id
+LEFT JOIN temp_month t  ON t.month_id = b.month_id
+```
+
+```{sql}
+--| connection: con
+SELECT (SELECT COUNT(*) FROM bss) AS surveys_before_join,
+       COUNT(*) AS rows_after_join,
+       COUNT(rain_in) AS has_rain,
+       COUNT(water_temp_c) AS has_temp
+FROM final
+```
+
+### Challenge 1: one species, many spellings
+
+The SQL version solves the spelling problem the same way: `LIKE '%BARTON%'`, `LIKE '%TOTAL%'` and so on match keywords instead of whole names, so the different spellings do not matter. The resulting groups match the R table:
+
+```{sql}
+--| connection: con
+SELECT species, measure, COUNT(*) AS n_rows, SUM(RESULT) AS total
+FROM sal_clean
+GROUP BY ALL
+ORDER BY ALL
+```
+
+### Challenge 2: the same animals counted several times
+
+Adding every Barton Springs measure overcounts; keeping only `total by size` does not:
+
+```{sql}
+--| connection: con
+SELECT SUM(RESULT) AS all_measures,
+       SUM(RESULT) FILTER (WHERE measure = 'total by size') AS total_by_size
+FROM sal_clean
+WHERE species = 'Barton Springs'
+```
+
+### Transformations
+
+- **Salamanders:** `WHERE` keeps only count rows, two `CASE WHEN ... LIKE` expressions build `species` and `measure`, and `CAST(SAMPLE_DATE AS DATE)` gives the survey date. DuckDB already reads `SAMPLE_DATE` as a `TIMESTAMP`, so no text parsing is needed. `GROUP BY SITE_NAME, survey_date` then sums `total by size` into one row per survey (`bss`).
+- **Rain:** a `CASE WHEN` recodes `T` to 0.005 and `M` to `NULL` inside the monthly `SUM` (`rain_month`).
+- **Water temperature:** `WHERE agency_cd = 'USGS'` drops the format row, and `AVG(CAST(... AS DOUBLE))` gives the monthly mean (`temp_month`).
+- **Join key:** the same `month_id = year * 12 + month`, with `prev_month_id = month_id - 1`.
+- **Joining:** three `LEFT JOIN`s build `final`, and the count query checks that the number of surveys did not change.
+
+### Result
+
+```{r}
+f <- dbGetQuery(con, "SELECT * FROM final")
+
+tibble(
+  version = c("R", "SQL"),
+  surveys = c(nrow(final), nrow(f)),
+  salamanders = c(sum(final$bss_total), sum(f$bss_total)),
+  mean_rain_prev = c(mean(final$rain_prev_month, na.rm = TRUE),
+                     mean(f$rain_prev_month, na.rm = TRUE)),
+  mean_temp = c(mean(final$water_temp_c, na.rm = TRUE),
+                mean(f$water_temp_c, na.rm = TRUE))
+) |>
+  gt() |>
+  fmt_number(columns = c(mean_rain_prev, mean_temp), decimals = 3)
+```
+
+The SQL version produces the same final table as the R version.
