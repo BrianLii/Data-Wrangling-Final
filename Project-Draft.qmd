@@ -1,10 +1,8 @@
 ---
-title: "Do Rain and Water Temperature Affect Salamander Counts at Barton Springs?"
-subtitle: "Data Wrangling Final Project: R tidyverse, DuckDB SQL, Python pandas and Excel Power Query"
-author: "Cody Wood and Brian Li"
 format:
   html:
-    embed-resources: true
+    self-contained: true
+    df-print: paged
 editor: visual
 ---
 
@@ -219,7 +217,7 @@ sal |>
 Listing all 53 names by hand would be long and easy to get wrong. Instead, the `mutate()` step that builds `sal_clean` looks for a few keywords that every spelling of the same thing shares, and turns each name into two clean columns:
 
 - `species`: names containing `BARTON` become `Barton Springs`; names containing `AUSTIN` become `Austin blind`. This works whether the name says `SPRINGS` or `SPGS`, `SLMNDR` or `SALAMANDER`.
-- `measure`: names containing `TOTAL` become `total by size`; names containing ` IN ` or ` ON ` (in cobble, on exposed substrate, ...) become `by substrate`; names containing `PHOTOGRAPHED` become `photographed`; everything else becomes `other`.
+- `measure`: names containing `TOTAL` become `total by size`; names containing `IN` or `ON` (in cobble, on exposed substrate, ...) become `by substrate`; names containing `PHOTOGRAPHED` become `photographed`; everything else becomes `other`.
 
 `case_when()` checks these rules from top to bottom and uses the first one that matches. Here is how some of the messy names come out:
 
@@ -300,7 +298,7 @@ ggplot(final, aes(water_temp_c, bss_total + 1)) +
 
 Water temperature barely changes. Because the springs are fed by groundwater, almost all months fall between 21 and 22 °C. The high counts cluster in that range, but so do most surveys, so this does not show that temperature drives the counts.
 
-Overall, neither rain nor water temperature has a clear relationship with salamander counts, which does not support our initial expectation. These are *observed* counts, not true population size, and they also depend on survey effort and conditions on the day.
+Overall, neither rain nor water temperature has a clear relationship with salamander counts, which does not support our initial expectation.
 
 ## SQL
 
